@@ -3,11 +3,14 @@
 Hermes Agent 的移动端 baseline（Expo + React Native + TypeScript）。
 
 ## 当前能力（MVP）
-- 配置 `API Base`（例如 `http://192.168.1.10:8123`）
-- 发送聊天消息到 `POST /api/chat`
-- 展示 Hermes 回复（兼容 `reply` / `content` 字段）
-- 本地持久化：API 地址、聊天记录（AsyncStorage）
+- 直连 Hermes 原生 OpenAI 兼容接口：`POST /v1/chat/completions`
+- 支持配置 `API Base`、`API Key`、`Model`
+- 展示 Hermes 回复（兼容 `choices[0].message.content` / `output_text` / `reply` / `content`）
+- 本地持久化：API 地址、Key、Model、聊天记录（AsyncStorage）
 - 一键清空会话
+
+## 默认接口
+- `http://127.0.0.1:8642/v1`
 
 ## 快速启动
 ```bash
@@ -21,22 +24,28 @@ npm run start
 请求：
 ```json
 {
-  "message": "你好",
+  "model": "hermes-agent",
   "messages": [
     { "role": "user", "content": "你好" }
-  ]
+  ],
+  "stream": false
 }
 ```
 
 响应（任一字段即可）：
 ```json
-{ "reply": "你好，我在。" }
+{ "choices": [{ "message": { "content": "你好，我在。" } }] }
 ```
 或
 ```json
-{ "content": "你好，我在。" }
+{ "output_text": "你好，我在。" }
+```
+或
+```json
+{ "reply": "你好，我在。" }
 ```
 
 ## 说明
-- 本项目优先级：可用性、响应速度、稳定性。
-- 当前未接入鉴权；若后端需要 token，可在下一步补 `Authorization` 头配置。
+- 这版已经从“自定义 `/api/chat`”切到 Hermes 原生 API。
+- 如果 Hermes 开了鉴权，就在 App 里填 `API Key`。
+- 若你要下一步做微信/飞书机器人式集成，可以直接复用 Hermes 的 `gateway/webhook/plugins` 路线。

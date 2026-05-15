@@ -22,43 +22,85 @@ type Message = {
   content: string;
 };
 
-const DEFAULT_API_BASE = 'http://192.168.1.10:8123';
+type HermesChatResponse = {
+  choices?: Array<{
+    message?: {
+      content?: unknown;
+    };
+  }>;
+  reply?: string;
+  content?: string;
+  output_text?: string;
+};
+
+const DEFAULT_API_BASE = 'http://127.0.0.1:8642/v1';
+const DEFAULT_MODEL = 'hermes-agent';
 const STORAGE_API_BASE_KEY = 'hermes.apiBase';
+const STORAGE_API_KEY = 'hermes.apiKey';
+const STORAGE_MODEL_KEY = 'hermes.model';
 const STORAGE_MESSAGES_KEY = 'hermes.messages';
+
+function normalizeBase(base: string) {
+  return base.trim().replace(/\/+$/, '');
+}
+
+function buildChatCompletionsUrl(base: string) {
+  const cleaned = normalizeBase(base);
+  return cleaned.endsWith('/v1') ? `${cleaned}/chat/completions` : `${cleaned}/v1/chat/completions`;
+}
+
+function extractAssistantText(data: HermesChatResponse) {
+  const choiceText = data.choices?.[0]?.message?.content;
+  if (typeof choiceText === 'string' && choiceText.trim()) return choiceText;
+  if (typeof data.output_text === 'string' && data.output_text.trim()) return data.output_text;
+  if (typeof data.reply === 'string' && data.reply.trim()) return data.reply;
+  if (typeof data.content === 'string' && data.content.trim()) return data.content;
+  return '（服务返回空内容）';
+}
+
+function normalizeAuthHeader(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return /^bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+}
 
 export default function App() {
   const [apiBase, setApiBase] = useState(DEFAULT_API_BASE);
+  const [apiKey, setApiKey] = useState('');
+  const [model, setModel] = useState(DEFAULT_MODEL);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bootstrapped, setBootstrapped] = useState(false);
 
+  const endpoint = useMemo(() => buildChatCompletionsUrl(apiBase), [apiBase]);
+
   const canSend = useMemo(
-    () => !loading && input.trim().length > 0 && apiBase.trim().length > 0,
+    () => !loading && input.trim().length > 0 && normalizeBase(apiBase).length > 0,
     [input, loading, apiBase]
   );
 
   useEffect(() => {
     (async () => {
       try {
-        const [storedBase, storedMessages] = await Promise.all([
+        const [storedBase, storedKey, storedModel, storedMessages] = await Promise.all([
           AsyncStorage.getItem(STORAGE_API_BASE_KEY),
+          AsyncStorage.getItem(STORAGE_API_KEY),
+          AsyncStorage.getItem(STORAGE_MODEL_KEY),
           AsyncStorage.getItem(STORAGE_MESSAGES_KEY),
         ]);
 
-        if (storedBase?.trim()) {
-          setApiBase(storedBase);
-        }
+        if (storedBase?.trim()) setApiBase(storedBase);
+        if (storedKey !== null) setApiKey(storedKey);
+        if (storedModel?.trim()) setModel(storedModel);
 
         if (storedMessages) {
           const parsed = JSON.parse(storedMessages) as Message[];
-          if (Array.isArray(parsed)) {
-            setMessages(parsed);
-          }
+          if (Array.isArray(parsed)) setMessages(parsed);
         }
       } catch {
-        // ignore local storage restore errors
+        // ignore local restore errors
       } finally {
         setBootstrapped(true);
       }
@@ -72,9 +114,17 @@ export default function App() {
 
   useEffect(() => {
     if (!bootstrapped) return;
-    AsyncStorage.setItem(STORAGE_MESSAGES_KEY, JSON.stringify(messages)).catch(
-      () => undefined
-    );
+    AsyncStorage.setItem(STORAGE_API_KEY, apiKey).catch(() => undefined);
+  }, [apiKey, bootstrapped]);
+
+  useEffect(() => {
+    if (!bootstrapped) return;
+    AsyncStorage.setItem(STORAGE_MODEL_KEY, model).catch(() => undefined);
+  }, [model, bootstrapped]);
+
+  useEffect(() => {
+    if (!bootstrapped) return;
+    AsyncStorage.setItem(STORAGE_MESSAGES_KEY, JSON.stringify(messages)).catch(() => undefined);
   }, [messages, bootstrapped]);
 
   async function onSend() {
@@ -94,35 +144,41 @@ export default function App() {
     setLoading(true);
 
     try {
-      const resp = await fetch(`${apiBase.replace(/\/$/, '')}/api/chat`, {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      const authHeader = normalizeAuthHeader(apiKey);
+      if (authHeader) headers.Authorization = authHeader;
+
+      const resp = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
-          message: text,
+          model: model.trim() || DEFAULT_MODEL,
           messages: nextMessages.map((m) => ({
             role: m.role,
             content: m.content,
           })),
+          stream: false,
         }),
       });
 
       if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
+        let detail = '';
+        try {
+          const body = (await resp.json()) as { error?: { message?: string } };
+          detail = body.error?.message ? `: ${body.error.message}` : '';
+        } catch {
+          // ignore parse errors
+        }
+        throw new Error(`HTTP ${resp.status}${detail}`);
       }
 
-      const data = (await resp.json()) as {
-        reply?: string;
-        content?: string;
-      };
-
-      const assistantText = data.reply ?? data.content ?? '（服务返回空内容）';
-
+      const data = (await resp.json()) as HermesChatResponse;
       const assistantMsg: Message = {
         id: `${Date.now()}-a`,
         role: 'assistant',
-        content: assistantText,
+        content: extractAssistantText(data),
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (e) {
@@ -145,23 +201,50 @@ export default function App() {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <View style={styles.headerRow}>
-          <Text style={styles.title}>Hermes Mobile Chat</Text>
+          <Text style={styles.title}>Hermes Native Chat</Text>
           <Pressable style={styles.clearBtn} onPress={onClearChat}>
             <Text style={styles.clearBtnText}>清空</Text>
           </Pressable>
         </View>
 
         <View style={styles.baseRow}>
-          <Text style={styles.label}>API Base</Text>
+          <Text style={styles.label}>Hermes API Base（含 /v1）</Text>
           <TextInput
             value={apiBase}
             onChangeText={setApiBase}
             style={styles.baseInput}
             autoCapitalize="none"
             autoCorrect={false}
-            placeholder="http://host:port"
+            placeholder="http://host:8642/v1"
           />
         </View>
+
+        <View style={styles.baseRow}>
+          <Text style={styles.label}>API Key（可选）</Text>
+          <TextInput
+            value={apiKey}
+            onChangeText={setApiKey}
+            style={styles.baseInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+            placeholder="sk-..."
+          />
+        </View>
+
+        <View style={styles.baseRow}>
+          <Text style={styles.label}>Model</Text>
+          <TextInput
+            value={model}
+            onChangeText={setModel}
+            style={styles.baseInput}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="hermes-agent"
+          />
+        </View>
+
+        <Text style={styles.endpoint}>Endpoint: {endpoint}</Text>
 
         <FlatList
           style={styles.list}
@@ -179,9 +262,7 @@ export default function App() {
               <Text style={styles.msgText}>{item.content}</Text>
             </View>
           )}
-          ListEmptyComponent={
-            <Text style={styles.empty}>发送第一条消息开始对话</Text>
-          }
+          ListEmptyComponent={<Text style={styles.empty}>发送第一条消息开始对话</Text>}
         />
 
         {error ? <Text style={styles.error}>请求失败：{error}</Text> : null}
@@ -199,11 +280,7 @@ export default function App() {
             disabled={!canSend}
             style={[styles.btn, !canSend && styles.btnDisabled]}
           >
-            {loading ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={styles.btnText}>发送</Text>
-            )}
+            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>发送</Text>}
           </Pressable>
         </View>
 
@@ -244,6 +321,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
     fontSize: 13,
+  },
+  endpoint: {
+    fontSize: 11,
+    color: '#6b7280',
+    marginBottom: 8,
   },
   list: { flex: 1, marginTop: 4 },
   listContent: { gap: 8, paddingVertical: 6 },
