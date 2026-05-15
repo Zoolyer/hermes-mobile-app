@@ -1,5 +1,6 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -22,6 +23,8 @@ type Message = {
 };
 
 const DEFAULT_API_BASE = 'http://192.168.1.10:8123';
+const STORAGE_API_BASE_KEY = 'hermes.apiBase';
+const STORAGE_MESSAGES_KEY = 'hermes.messages';
 
 export default function App() {
   const [apiBase, setApiBase] = useState(DEFAULT_API_BASE);
@@ -29,11 +32,50 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [bootstrapped, setBootstrapped] = useState(false);
 
   const canSend = useMemo(
     () => !loading && input.trim().length > 0 && apiBase.trim().length > 0,
     [input, loading, apiBase]
   );
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [storedBase, storedMessages] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_API_BASE_KEY),
+          AsyncStorage.getItem(STORAGE_MESSAGES_KEY),
+        ]);
+
+        if (storedBase?.trim()) {
+          setApiBase(storedBase);
+        }
+
+        if (storedMessages) {
+          const parsed = JSON.parse(storedMessages) as Message[];
+          if (Array.isArray(parsed)) {
+            setMessages(parsed);
+          }
+        }
+      } catch {
+        // ignore local storage restore errors
+      } finally {
+        setBootstrapped(true);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!bootstrapped) return;
+    AsyncStorage.setItem(STORAGE_API_BASE_KEY, apiBase).catch(() => undefined);
+  }, [apiBase, bootstrapped]);
+
+  useEffect(() => {
+    if (!bootstrapped) return;
+    AsyncStorage.setItem(STORAGE_MESSAGES_KEY, JSON.stringify(messages)).catch(
+      () => undefined
+    );
+  }, [messages, bootstrapped]);
 
   async function onSend() {
     const text = input.trim();
@@ -46,7 +88,8 @@ export default function App() {
       content: text,
     };
 
-    setMessages((prev) => [...prev, userMsg]);
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
     setInput('');
     setLoading(true);
 
@@ -58,7 +101,7 @@ export default function App() {
         },
         body: JSON.stringify({
           message: text,
-          messages: [...messages, userMsg].map((m) => ({
+          messages: nextMessages.map((m) => ({
             role: m.role,
             content: m.content,
           })),
@@ -90,13 +133,23 @@ export default function App() {
     }
   }
 
+  function onClearChat() {
+    setMessages([]);
+    setError(null);
+  }
+
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
-        <Text style={styles.title}>Hermes Mobile Chat</Text>
+        <View style={styles.headerRow}>
+          <Text style={styles.title}>Hermes Mobile Chat</Text>
+          <Pressable style={styles.clearBtn} onPress={onClearChat}>
+            <Text style={styles.clearBtnText}>清空</Text>
+          </Pressable>
+        </View>
 
         <View style={styles.baseRow}>
           <Text style={styles.label}>API Base</Text>
@@ -163,7 +216,24 @@ export default function App() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#f5f7fb' },
   container: { flex: 1, paddingHorizontal: 14, paddingTop: 8, paddingBottom: 10 },
-  title: { fontSize: 20, fontWeight: '700', marginBottom: 8, color: '#121826' },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  title: { fontSize: 20, fontWeight: '700', color: '#121826' },
+  clearBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#e7ecf4',
+  },
+  clearBtnText: {
+    fontSize: 12,
+    color: '#334155',
+    fontWeight: '600',
+  },
   baseRow: { marginBottom: 8 },
   label: { fontSize: 12, color: '#5b6472', marginBottom: 4 },
   baseInput: {
