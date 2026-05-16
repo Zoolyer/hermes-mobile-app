@@ -10,7 +10,9 @@ Hermes Agent 的移动端 baseline（Expo + React Native + TypeScript）。
 - 一键清空会话
 
 ## 默认接口
-- `http://127.0.0.1:8642/v1`
+- 本机：`http://127.0.0.1:8642/v1`
+- Android 模拟器：`http://10.0.2.2:8642/v1`
+- 真机（同网段）：`http://<Hermes主机局域网IP>:8642/v1`（App 内有一键填充示例）
 
 ## 快速启动
 ```bash
@@ -49,3 +51,6 @@ npm run start
 - 这版已经从“自定义 `/api/chat`”切到 Hermes 原生 API。
 - 如果 Hermes 开了鉴权，就在 App 里填 `API Key`。
 - 若你要下一步做微信/飞书机器人式集成，可以直接复用 Hermes 的 `gateway/webhook/plugins` 路线。
+
+## 开发文档
+- 官方体系接口与里程碑计划：`docs/HERMES_OFFICIAL_INTERFACE_AND_PLAN.md`

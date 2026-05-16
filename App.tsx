@@ -33,8 +33,31 @@ type HermesChatResponse = {
   output_text?: string;
 };
 
+type HermesCapabilitiesResponse = {
+  features?: {
+    chat_completions?: boolean;
+    models?: boolean;
+    [key: string]: unknown;
+  };
+  endpoints?: {
+    chat_completions?: { path?: string };
+    models?: { path?: string };
+    capabilities?: { path?: string };
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+type HermesModelsResponse = {
+  data?: Array<{ id?: unknown; name?: unknown }>;
+  models?: Array<{ id?: unknown; name?: unknown }>;
+  [key: string]: unknown;
+};
+
 const DEFAULT_API_BASE = 'http://127.0.0.1:8642/v1';
 const DEFAULT_MODEL = 'hermes-agent';
+const DEFAULT_ANDROID_EMULATOR_BASE = 'http://10.0.2.2:8642/v1';
+const DEFAULT_LAN_BASE = 'http://172.31.131.117:8642/v1';
 const STORAGE_API_BASE_KEY = 'hermes.apiBase';
 const STORAGE_API_KEY = 'hermes.apiKey';
 const STORAGE_MODEL_KEY = 'hermes.model';
@@ -44,9 +67,14 @@ function normalizeBase(base: string) {
   return base.trim().replace(/\/+$/, '');
 }
 
-function buildChatCompletionsUrl(base: string) {
+function buildApiUrl(base: string, path: string) {
   const cleaned = normalizeBase(base);
-  return cleaned.endsWith('/v1') ? `${cleaned}/chat/completions` : `${cleaned}/v1/chat/completions`;
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return cleaned.endsWith('/v1') ? `${cleaned}${normalizedPath}` : `${cleaned}/v1${normalizedPath}`;
+}
+
+function buildChatCompletionsUrl(base: string) {
+  return buildApiUrl(base, '/chat/completions');
 }
 
 function extractAssistantText(data: HermesChatResponse) {
@@ -64,6 +92,51 @@ function normalizeAuthHeader(value: string) {
   return /^bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
 }
 
+async function readHttpErrorDetail(resp: Response) {
+  try {
+    const body = (await resp.json()) as {
+      error?: { message?: unknown };
+      message?: unknown;
+    };
+    const errorMessage = body.error?.message;
+    if (typeof errorMessage === 'string' && errorMessage.trim()) {
+      return `: ${errorMessage}`;
+    }
+    if (typeof body.message === 'string' && body.message.trim()) {
+      return `: ${body.message}`;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return '';
+}
+
+function formatHttpFailure(endpointName: string, status: number, detail: string) {
+  if (status === 404) {
+    return `${endpointName} 404${detail}，请确认 Hermes API Base 与路由是否正确`;
+  }
+  if (status === 401 || status === 403) {
+    return `${endpointName} ${status}${detail}，请检查 API Key / 鉴权`;
+  }
+  return `${endpointName} HTTP ${status}${detail}`;
+}
+
+function extractModelIds(data: HermesModelsResponse) {
+  const source = Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : [];
+  const ids = source.reduce<string[]>((acc, item) => {
+    if (typeof item.id === 'string' && item.id.trim()) acc.push(item.id.trim());
+    if (typeof item.name === 'string' && item.name.trim()) acc.push(item.name.trim());
+    return acc;
+  }, []);
+  return Array.from(new Set(ids));
+}
+
+function supportLabel(value: boolean | undefined) {
+  if (value === true) return '支持';
+  if (value === false) return '不支持';
+  return '未知';
+}
+
 export default function App() {
   const [apiBase, setApiBase] = useState(DEFAULT_API_BASE);
   const [apiKey, setApiKey] = useState('');
@@ -73,13 +146,70 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bootstrapped, setBootstrapped] = useState(false);
+  const [probeLoading, setProbeLoading] = useState(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const [probeCheckedAt, setProbeCheckedAt] = useState<string | null>(null);
+  const [probeCapabilities, setProbeCapabilities] = useState<HermesCapabilitiesResponse | null>(null);
+  const [probeModels, setProbeModels] = useState<string[]>([]);
 
   const endpoint = useMemo(() => buildChatCompletionsUrl(apiBase), [apiBase]);
+  const capabilitiesEndpoint = useMemo(() => buildApiUrl(apiBase, '/capabilities'), [apiBase]);
+  const modelsEndpoint = useMemo(() => buildApiUrl(apiBase, '/models'), [apiBase]);
+  const apiBaseReady = useMemo(() => normalizeBase(apiBase).length > 0, [apiBase]);
 
   const canSend = useMemo(
-    () => !loading && input.trim().length > 0 && normalizeBase(apiBase).length > 0,
-    [input, loading, apiBase]
+    () => bootstrapped && !loading && input.trim().length > 0 && apiBaseReady,
+    [bootstrapped, input, loading, apiBaseReady]
   );
+
+  async function onProbeApi() {
+    if (!apiBaseReady || probeLoading) return;
+
+    setProbeError(null);
+    setProbeLoading(true);
+
+    const headers: Record<string, string> = {};
+    const authHeader = normalizeAuthHeader(apiKey);
+    if (authHeader) headers.Authorization = authHeader;
+
+    const errors: string[] = [];
+
+    try {
+      const resp = await fetch(capabilitiesEndpoint, {
+        method: 'GET',
+        headers,
+      });
+      if (!resp.ok) {
+        errors.push(formatHttpFailure('/v1/capabilities', resp.status, await readHttpErrorDetail(resp)));
+      } else {
+        const data = (await resp.json()) as HermesCapabilitiesResponse;
+        setProbeCapabilities(data);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`/v1/capabilities ${msg}`);
+    }
+
+    try {
+      const resp = await fetch(modelsEndpoint, {
+        method: 'GET',
+        headers,
+      });
+      if (!resp.ok) {
+        errors.push(formatHttpFailure('/v1/models', resp.status, await readHttpErrorDetail(resp)));
+      } else {
+        const data = (await resp.json()) as HermesModelsResponse;
+        setProbeModels(extractModelIds(data));
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(`/v1/models ${msg}`);
+    }
+
+    setProbeCheckedAt(new Date().toLocaleString());
+    setProbeError(errors.length > 0 ? errors.join(' ｜ ') : null);
+    setProbeLoading(false);
+  }
 
   useEffect(() => {
     (async () => {
@@ -164,14 +294,7 @@ export default function App() {
       });
 
       if (!resp.ok) {
-        let detail = '';
-        try {
-          const body = (await resp.json()) as { error?: { message?: string } };
-          detail = body.error?.message ? `: ${body.error.message}` : '';
-        } catch {
-          // ignore parse errors
-        }
-        throw new Error(`HTTP ${resp.status}${detail}`);
+        throw new Error(formatHttpFailure('/v1/chat/completions', resp.status, await readHttpErrorDetail(resp)));
       }
 
       const data = (await resp.json()) as HermesChatResponse;
@@ -217,6 +340,23 @@ export default function App() {
             autoCorrect={false}
             placeholder="http://host:8642/v1"
           />
+          <View style={styles.quickBaseRow}>
+            <Pressable style={styles.quickBaseBtn} onPress={() => setApiBase(DEFAULT_API_BASE)}>
+              <Text style={styles.quickBaseBtnText}>本机127.0.0.1</Text>
+            </Pressable>
+            <Pressable
+              style={styles.quickBaseBtn}
+              onPress={() => setApiBase(DEFAULT_ANDROID_EMULATOR_BASE)}
+            >
+              <Text style={styles.quickBaseBtnText}>安卓模拟器10.0.2.2</Text>
+            </Pressable>
+            <Pressable style={styles.quickBaseBtn} onPress={() => setApiBase(DEFAULT_LAN_BASE)}>
+              <Text style={styles.quickBaseBtnText}>同网段LAN</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.baseHint}>
+            真机不能用 127.0.0.1；请改为 Hermes 所在机器的局域网 IP（例如 {DEFAULT_LAN_BASE}）。
+          </Text>
         </View>
 
         <View style={styles.baseRow}>
@@ -245,6 +385,40 @@ export default function App() {
         </View>
 
         <Text style={styles.endpoint}>Endpoint: {endpoint}</Text>
+
+        <View style={styles.probeCard}>
+          <View style={styles.probeHeaderRow}>
+            <View>
+              <Text style={styles.probeTitle}>接口探测</Text>
+              <Text style={styles.probeMeta}>GET {capabilitiesEndpoint}</Text>
+              <Text style={styles.probeMeta}>GET {modelsEndpoint}</Text>
+            </View>
+            <Pressable
+              onPress={onProbeApi}
+              disabled={!apiBaseReady || probeLoading}
+              style={[styles.probeBtn, (!apiBaseReady || probeLoading) && styles.btnDisabled]}
+            >
+              <Text style={styles.probeBtnText}>{probeLoading ? '检测中…' : '检测接口'}</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.probeSummaryRow}>
+            <Text style={styles.probeSummaryText}>
+              chat_completions：{supportLabel(probeCapabilities?.features?.chat_completions)}
+            </Text>
+            <Text style={styles.probeSummaryText}>模型数：{probeModels.length}</Text>
+          </View>
+
+          {probeCheckedAt ? <Text style={styles.probeMeta}>最近检测：{probeCheckedAt}</Text> : null}
+
+          {probeModels.length ? (
+            <Text style={styles.probeModels} numberOfLines={2}>
+              模型：{probeModels.join('、')}
+            </Text>
+          ) : null}
+
+          {probeError ? <Text style={styles.probeError}>探测失败：{probeError}</Text> : null}
+        </View>
 
         <FlatList
           style={styles.list}
@@ -312,6 +486,29 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   baseRow: { marginBottom: 8 },
+  baseHint: {
+    marginTop: 6,
+    fontSize: 11,
+    color: '#64748b',
+    lineHeight: 16,
+  },
+  quickBaseRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  quickBaseBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#e2e8f0',
+  },
+  quickBaseBtnText: {
+    fontSize: 11,
+    color: '#334155',
+    fontWeight: '600',
+  },
   label: { fontSize: 12, color: '#5b6472', marginBottom: 4 },
   baseInput: {
     borderWidth: 1,
@@ -326,6 +523,63 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#6b7280',
     marginBottom: 8,
+  },
+  probeCard: {
+    borderWidth: 1,
+    borderColor: '#dbe4f0',
+    backgroundColor: '#fbfdff',
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 8,
+  },
+  probeHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  probeTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 3,
+  },
+  probeBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: '#0f766e',
+  },
+  probeBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  probeMeta: {
+    fontSize: 11,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  probeSummaryRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 8,
+  },
+  probeSummaryText: {
+    fontSize: 12,
+    color: '#334155',
+    fontWeight: '600',
+  },
+  probeModels: {
+    marginTop: 6,
+    fontSize: 11,
+    color: '#475569',
+  },
+  probeError: {
+    marginTop: 6,
+    color: '#b42318',
+    fontSize: 11,
+    lineHeight: 16,
   },
   list: { flex: 1, marginTop: 4 },
   listContent: { gap: 8, paddingVertical: 6 },
